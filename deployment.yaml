@@ -14,7 +14,7 @@ spec:
         app: hello-world
     spec:
       containers:
-      - image: kimjuhyo/cicd-kaniko-argo:latest
+      - image: kimjuhyo/cicd-k8s:4
         name: hello-world
         ports:
         - containerPort: 8080
