@@ -1,25 +1,94 @@
 pipeline {
-  agent any
-
-  triggers {
-    pollSCM('* * * * *')
+  agent {
+    kubernetes {
+      yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: maven
+    image: maven:3.8.6-openjdk-8
+    command:
+    - sleep
+    args:
+    - infinity
+  - name: git
+    image: alpine/git
+    command:
+    - sleep
+    args:
+    - infinity
+  - name: kaniko
+    image: gcr.io/kaniko-project/executor:debug
+    command:
+    - sleep
+    args:
+    - infinity
+    volumeMounts:
+    - name: registry-credentials
+      mountPath: /kaniko/.docker
+  volumes:
+  - name: registry-credentials
+    secret:
+      secretName: regcred
+      items:
+      - key: .dockerconfigjson
+        path: config.json
+'''
+    }
   }
-
   stages {
     stage('Checkout') {
       steps {
-        git branch: 'main', 
-        url: 'https://github.com/jhkim-09/tests.git'
+        container('maven') {
+          git branch: 'main', url: 'https://github.com/jhkim-09/tests.git'
+        }
       }
     }
     stage('Build') {
       steps {
-        sh 'mvn clean package'
+        container('maven') {
+          sh 'mvn clean package -DskipTests=true'
+        }
       }
     }
-    stage('Deploy') {
+    stage('Test') {
       steps {
-        deploy adapters: [tomcat9(credentialsId: 'tomcat-manager', url: 'http://192.168.56.102:8080')], contextPath: null, war: 'target/hello-world.war'
+        container('maven') {
+          sh 'mvn test'
+        }
+      }
+    }
+    stage('Build & Tag & Push Docker Image') {
+      steps {
+        container('kaniko') {
+          sh 'executor --context=dir:///home/jenkins/agent/workspace/kube_pipeline/ --destination=cicd-k8s:$BUILD_NUMBER --destination=cicd-k8s:latest'
+        }
+      }
+    }
+    stage('Update K8s Manifests & Push') {
+      environment {
+        githubUser = 'jhkim-09' 
+        githubEmail = 'kimjuhyo@naver.com' //c1t1d0s7@example.com
+        githubId = 'jhkim-09' //c1t1d0s7 
+        githubRepo = 'tests' //jenkins-kube-deploy
+        githubURL = "https://github.com/${githubId}/${githubRepo}.git"
+        dockerhubId = 'kimjuhyo' //c1t1d0s7
+        dockerhubRepo = 'cicd-k8s' //hello-world
+      }
+      steps {
+        container('git') {
+          git branch: 'main', credentialsId: 'github-credential', url: "${githubURL}"
+          sh "git config --global --add safe.directory ${workspace}"
+          sh "git config --global user.name ${githubUser}"
+          sh "git config --global user.email ${githubEmail}"
+          sh 'sed -i "s/image:.*/image: ${dockerhubId}\\/${dockerhubRepo}:${BUILD_NUMBER}/g" deployment.yaml'
+          sh 'git add deployment.yaml'
+          sh 'git commit -m "Jenkins Build Number - ${BUILD_NUMBER}"'
+          withCredentials([gitUsernamePassword(credentialsId: 'github-credential', gitToolName: 'Default')]) {
+            sh 'git push --set-upstream origin main'
+          }
+        }
       }
     }
   }
